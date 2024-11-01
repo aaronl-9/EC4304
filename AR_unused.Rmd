@@ -1,3 +1,10 @@
+---
+title: "AR"
+author: "Aaron"
+date: "30-10-2024"
+output: html_document
+---
+
 # ARMA(2,3) [UNUSED]
 
 ```{r}
