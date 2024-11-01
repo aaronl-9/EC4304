@@ -1,0 +1,214 @@
+---
+title: "VAR"
+author: "Aaron"
+date: "30-10-2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(pacman)
+p_load(tidyverse, vars, timeSeries, haven, tseries, forecast, metrics)
+```
+
+Training split = 380; Test: 381-480
+
+```{r}
+data <- read_dta("data.dta")
+data2 <- data %>% 
+  dplyr::select(indpro_1step, oecd_cli, news_sentiment, cb_lei)
+```
+
+```{r}
+data_ts <- ts(data2, frequency = 12, start = c(1980,1)) # Change window to T-V-T split
+
+adf.test(data_ts[,"indpro_1step"])
+adf.test(data_ts[,"news_sentiment"])
+adf.test(data_ts[,"oecd_cli"])
+adf.test(data_ts[,"cb_lei"]) # Not stationary
+```
+
+```{r}
+acf(data_ts[,1])
+pacf(data_ts[,1])
+```
+
+# VAR
+
+```{r}
+data_ts0 <- window(data_ts, start=c(1980,1), end=c(2019,12))
+data_train <- as.ts(data_ts0[1:380,1:3]) # Training data
+data_test <- as.ts(data_ts0[381:nrow(data_ts0),1:3])
+```
+
+## AIC lag selection
+
+```{r}
+lag_selection <- VARselect(data_train, lag.max = 12, type = "const")
+lag_selection$criteria["AIC(n)",]
+lag_selection$selection["AIC(n)"] # 5 lags
+```
+
+```{r}
+varm <- VAR(data_train, p = 5, type = "const")
+```
+
+```{r}
+NWlag <- (0.75 * nrow(data_train)^(1/3)) %>% round() # newey lags
+
+causality(varm, cause = "news_sentiment", 
+          vcov. = NeweyWest(varm, lag = NWlag, prewhite = 0))$Granger
+causality(varm, cause = "oecd_cli", 
+          vcov. = NeweyWest(varm, lag = NWlag, prewhite = 0))$Granger
+causality(varm, cause = "indpro_1step", 
+          vcov. = NeweyWest(varm, lag = NWlag, prewhite = 0))$Granger
+```
+
+```{r}
+forecast_var <- predict(varm)
+forecast_var
+
+a <-predict(varm)
+a$fcst$indpro_1step[1]
+```
+
+## 1SA forecast
+
+```{r}
+forecast_tbl <- numeric(nrow(data_test))
+
+for (i in 1:nrow(data_test)) {
+  rolling_window <- data_ts0[i:(nrow(data_train) + i - 1), 1:3]
+  # cat("Running observations", i, " to ", (nrow(data_train) + i - 1), "\n")
+  var_rl <- VAR(rolling_window, p = 5, type = "const")
+  forecast_tbl[i] <- predict(var_rl)$fcst$indpro_1step[1,1]
+}
+
+rmse(data_test[,1], forecast_tbl) # Pseudo OOS RMSE
+```
+
+## 3SA forecast
+
+```{r}
+
+```
+
+# ARMA(2,3) [UNUSED]
+
+```{r}
+train_n = 280
+
+train_start = 1
+train_end = train_n
+val_start = train_end + 1
+val_end = val_start + 99
+test_start = val_end + 1
+test_end = nrow(data_ts0)
+
+val_fct = val_end - val_start
+oos_fct = test_end - test_start
+```
+
+```{r, warning=FALSE}
+# ARMA(p,q)
+p = 2
+q = 3
+n_ahead = 1
+forecasts <- numeric(oos_fct+1)
+
+for (i in 1:(oos_fct+1)) {
+  data_am <- data_ts1[i:(i + train_end - 1),1]
+  
+  arma_fit <- tryCatch(
+    {
+    arima(data_am, order = c(p,0,q))
+  },
+    error = function(x) {return(NULL)}
+  )
+  if(!is.null(arma_fit)) {
+    fct <- forecast(arma_fit, h = n_ahead) # 1-step ahead
+    forecasts[i] <- fct$mean[n_ahead]
+  }
+  else {
+    forecasts[i] <- NA
+  }
+}
+
+actuals <- data_ts1[val_start:val_end,1]
+arma_rmse <- rmse(actuals, forecasts)
+
+paste0("NAs: ", sum(is.na(forecasts)))
+paste0("RMSE:  ", arma_rmse)
+```
+
+# AR [UNUSED]
+
+```{r}
+ar_forecast_tbl <- numeric(nrow(data_test)-2)
+
+for (i in 1:nrow(data_test)) {
+  rolling_window <- data_ts0[(i):(nrow(data_train) + i - 1), 1]
+  cat("Running observations", i, " to ", nrow(data_train) + i - 1, "\n")
+  ar_rl <- ar.ols(rolling_window, order.max = 2)
+  forecast_tbl[i] <- predict(ar_rl)$pred
+}
+
+rmse(data_test[,1], ar_forecast_tbl)
+```
+
+```{r}
+train_end <- 380
+forecasts <- numeric(100)
+n_ahead <- 1
+order <- 1
+
+for (i in 1:100) {
+  data_am <- data_ts0[(i+2):(i + train_end),1] # Set start to t=3 for AR consistency
+  ar_fit <- ar.ols(data_am, order.max = order)
+  
+  fct <- forecast::forecast(ar_fit, h = n_ahead) # 1-step ahead [ITERATED FORECAST]
+  forecasts[i] <- fct$mean[n_ahead]
+}
+
+ar_actuals <- data_ts0[(train_end+1):480, 1]
+ar_rmsfe <- rmse(ar_actuals, forecasts)
+
+paste0("NAs: ", sum(is.na(forecasts)))
+paste0("RMSFE:  ", ar_rmsfe)
+```
+
+```{r}
+# Direct forecast 
+
+train_end <- 380
+forecasts_3step <- numeric(100)
+n_ahead <- 1  # Directly forecast 3 steps ahead
+
+# Rolling forecast loop for direct 3-step-ahead forecasting
+for (i in 1:100) {
+  # Define the training subset (rolling window)
+  data_am <- data_ts0[i:(i + train_end), 1]
+  
+  # Shift target variable forward by 3 steps to create 3-step-ahead target
+  target_3step <- dplyr::lead(data_ts0[, 1], n_ahead)[i:(i + train_end)]
+  
+  # Combine training data to remove NA values caused by shifting
+  training_data <- data.frame(y = target_3step, lag_y = dplyr::lag(data_am, 1))
+  training_data <- na.omit(training_data)  # Remove rows with NA
+  
+  # Fit AR(1) model for direct 3-step-ahead prediction
+  ar_fit <- lm(y ~ lag_y, data = training_data)
+  
+  # Forecast 3 steps ahead based on last available observation
+  last_obs <- tail(data_am, 1)
+  forecasts_3step[i] <- predict(ar_fit, newdata = data.frame(lag_y = last_obs))
+}
+
+# Actual values for the 3-step-ahead forecast period
+ar_actuals_3step <- data_ts0[(train_end + n_ahead):(480), 1]
+
+# Calculate RMSE for the 3-step-ahead forecasts
+ar_rmse_3step <- rmse(ar_actuals_3step, forecasts_3step)
+print(ar_rmse_3step)
+```
